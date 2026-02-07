@@ -29,9 +29,7 @@ class ProductController extends Controller
         return response()->json($product,201);
     }
 
-    /**
-     * Display the specified resource.
-     */
+    // mostrar un solo producto
     public function show(string $id)
     {
         $product = Product::find($id);
@@ -41,9 +39,7 @@ class ProductController extends Controller
         else return response()->json($product,201);
     }
 
-    /**
-     * Update the specified resource in storage.
-     */
+    // actualizar un producto
     public function update(Request $request, string $id)
     {
         $validate = $request->validate([
@@ -61,9 +57,7 @@ class ProductController extends Controller
         return response()->json($product,201);    
     }
 
-    /**
-     * Remove the specified resource from storage.
-     */
+    // eliminar un producto
     public function destroy(string $id)
     {
         $product = Product::find($id);

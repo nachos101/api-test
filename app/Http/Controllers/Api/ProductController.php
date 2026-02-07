@@ -22,11 +22,6 @@ class ProductController extends Controller
             $query->where('category', $request->category);
         }
 
-        // filtro por marca
-        if ($request->has('brand')) {
-            $query->where('brand', $request->brand);
-        }
-
         // filtro por rango de precio
         if ($request->has('min_price')) {
             $query->where('price', '>=', $request->min_price);

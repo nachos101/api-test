@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
+use App\Http\Requests\StoreProductRequest;
+use App\Http\Requests\UpdateProductRequest;
 use App\Models\Product;
 
 class ProductController extends Controller
@@ -46,16 +48,9 @@ class ProductController extends Controller
 
 
     // cargar un nuevo producto
-    public function store(Request $request)
+    public function store(StoreProductRequest $request)
     {
-        $validate = $request->validate([
-            'name' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'category' => 'required|string|max:100',
-            'price' => 'required|numeric|min:0',
-            'stock' => 'required|integer|min:0'
-        ]);
-        $product = Product::create($validate);
+        $product = Product::create($request->validated());
         return response()->json($product,201);
     }
 
@@ -70,21 +65,17 @@ class ProductController extends Controller
     }
 
     // actualizar un producto
-    public function update(Request $request, string $id)
+    public function update(UpdateProductRequest $request, Product $product)
     {
-        $validate = $request->validate([
-            'name' => 'required|string|max:255',
-            'description' => 'nullable|string',
-            'category' => 'required|string|max:100',
-            'price' => 'required|numeric|min:0',
-            'stock' => 'required|integer|min:0'
-        ]);
-        $product = Product::find($id);
+        $product = Product::with(['name', 'description', 'category', 'price', 'stock'])
+        ->where('id', $product->id)
+        ->firstOrFail();
+        /*$product = Product::find($id);
         if (!$product) {
             return response()->json("No se encontro el producto",404);
-        }
-        $product->update($validate);
-        return response()->json($product,201);    
+        }*/
+        $product->update($request->validated());
+        return response()->json($product,200);    
     }
 
     // eliminar un producto

@@ -1,0 +1,843 @@
+diff --git a/app/Enums/UserRole.php b/app/Enums/UserRole.php
+new file mode 100644
+index 0000000..676e19a
+--- /dev/null
++++ b/app/Enums/UserRole.php
+@@ -0,0 +1,9 @@
++<?php
++
++namespace App\Enums;
++
++enum UserRole: string
++{
++    case User = 'user';
++    case Admin = 'admin';
++}
+diff --git a/app/Http/Controllers/Api/ProductController.php b/app/Http/Controllers/Api/ProductController.php
+index d2a8b45..cb3041e 100644
+--- a/app/Http/Controllers/Api/ProductController.php
++++ b/app/Http/Controllers/Api/ProductController.php
+@@ -51,7 +51,9 @@ public function index(IndexProductRequest $request)
+     // cargar un nuevo producto
+     public function store(StoreProductRequest $request)
+     {
+-        $product = Product::create($request->validated());
++        // La autorización la resuelve StoreProductRequest::authorize().
++        // El dueño lo define el servidor, nunca el cuerpo del request.
++        $product = $request->user()->products()->create($request->validated());
+ 
+         return response()->json($product, 201);
+     }
+@@ -73,6 +75,9 @@ public function update(UpdateProductRequest $request, Product $product)
+     // eliminar un producto
+     public function destroy(Product $product)
+     {
++        // No hay Form Request para DELETE, así que autorizamos acá.
++        $this->authorize('delete', $product);
++
+         $product->delete();
+ 
+         return response()->json('Producto eliminado', 200);
+diff --git a/app/Http/Controllers/Controller.php b/app/Http/Controllers/Controller.php
+index 8677cd5..e7f7c94 100644
+--- a/app/Http/Controllers/Controller.php
++++ b/app/Http/Controllers/Controller.php
+@@ -2,7 +2,9 @@
+ 
+ namespace App\Http\Controllers;
+ 
++use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
++
+ abstract class Controller
+ {
+-    //
++    use AuthorizesRequests;
+ }
+diff --git a/app/Http/Requests/StoreProductRequest.php b/app/Http/Requests/StoreProductRequest.php
+index 222bd48..fa779a8 100644
+--- a/app/Http/Requests/StoreProductRequest.php
++++ b/app/Http/Requests/StoreProductRequest.php
+@@ -2,14 +2,15 @@
+ 
+ namespace App\Http\Requests;
+ 
++use App\Models\Product;
+ use Illuminate\Foundation\Http\FormRequest;
+ 
+ class StoreProductRequest extends FormRequest
+ {
+-    // autorizar 
++    // autorizar: delega en ProductPolicy::create()
+     public function authorize(): bool
+     {
+-        return true;
++        return $this->user()?->can('create', Product::class) ?? false;
+     }
+ 
+     // reglas de validacion
+diff --git a/app/Http/Requests/UpdateProductRequest.php b/app/Http/Requests/UpdateProductRequest.php
+index 514a880..29444ee 100644
+--- a/app/Http/Requests/UpdateProductRequest.php
++++ b/app/Http/Requests/UpdateProductRequest.php
+@@ -2,17 +2,25 @@
+ 
+ namespace App\Http\Requests;
+ 
++use App\Models\Product;
+ use Illuminate\Foundation\Http\FormRequest;
+ 
+ class UpdateProductRequest extends FormRequest
+ {
+     /**
+      * Determine if the user is authorized to make this request.
++     *
++     * Se ejecuta ANTES de las reglas de validación, así que un usuario sin
++     * permiso recibe 403 y no 422, sin enterarse de si los datos eran válidos.
+      */
+     public function authorize(): bool
+     {
+-        return true;
++        $product = $this->route('product');
++
++        return $product instanceof Product
++            && ($this->user()?->can('update', $product) ?? false);
+     }
++
+     /**
+      * Get the validation rules that apply to the request.
+      *
+@@ -20,7 +28,7 @@ public function authorize(): bool
+      */
+     public function rules(): array
+     {
+-        return [        
++        return [
+             'name' => 'required|string|max:255',
+             'description' => 'nullable|string',
+             'category' => 'required|string|max:100',
+diff --git a/app/Models/Product.php b/app/Models/Product.php
+index b679d78..e4b2722 100644
+--- a/app/Models/Product.php
++++ b/app/Models/Product.php
+@@ -2,19 +2,33 @@
+ 
+ namespace App\Models;
+ 
+-use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\Factories\HasFactory;
+-
++use Illuminate\Database\Eloquent\Model;
++use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ class Product extends Model
+ {
+     use HasFactory;
+ 
++    /**
++     * 'user_id' NO es fillable a propósito: el dueño lo define el servidor
++     * a partir del usuario autenticado, nunca el cuerpo del request.
++     */
+     protected $fillable = [
+         'name',
+         'description',
+         'category',
+         'price',
+-        'stock'
++        'stock',
+     ];
++
++    /**
++     * Usuario que cargó el producto. Puede ser null (catálogo sin dueño).
++     *
++     * @return BelongsTo<User, $this>
++     */
++    public function user(): BelongsTo
++    {
++        return $this->belongsTo(User::class);
++    }
+ }
+diff --git a/app/Models/User.php b/app/Models/User.php
+index 10d960e..a503233 100644
+--- a/app/Models/User.php
++++ b/app/Models/User.php
+@@ -2,13 +2,13 @@
+ 
+ namespace App\Models;
+ 
+-// use Illuminate\Contracts\Auth\MustVerifyEmail;
++use App\Enums\UserRole;
+ use Illuminate\Database\Eloquent\Factories\HasFactory;
++use Illuminate\Database\Eloquent\Relations\HasMany;
+ use Illuminate\Foundation\Auth\User as Authenticatable;
+ use Illuminate\Notifications\Notifiable;
+ use Laravel\Sanctum\HasApiTokens;
+ 
+-
+ class User extends Authenticatable
+ {
+     /** @use HasFactory<\Database\Factories\UserFactory> */
+@@ -17,6 +17,9 @@ class User extends Authenticatable
+     /**
+      * The attributes that are mass assignable.
+      *
++     * Importante: 'role' NO va acá. Si fuera asignable en masa, cualquiera
++     * podría mandar {"role":"admin"} al endpoint de registro.
++     *
+      * @var list<string>
+      */
+     protected $fillable = [
+@@ -45,6 +48,22 @@ protected function casts(): array
+         return [
+             'email_verified_at' => 'datetime',
+             'password' => 'hashed',
++            'role' => UserRole::class,
+         ];
+     }
++
++    /**
++     * Productos cargados por este usuario.
++     *
++     * @return HasMany<Product, $this>
++     */
++    public function products(): HasMany
++    {
++        return $this->hasMany(Product::class);
++    }
++
++    public function isAdmin(): bool
++    {
++        return $this->role === UserRole::Admin;
++    }
+ }
+diff --git a/app/Policies/ProductPolicy.php b/app/Policies/ProductPolicy.php
+new file mode 100644
+index 0000000..d4cb577
+--- /dev/null
++++ b/app/Policies/ProductPolicy.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\Product;
++use App\Models\User;
++
++class ProductPolicy
++{
++    /**
++     * Lectura pública: el listado y el detalle no requieren autenticación,
++     * por eso estos métodos aceptan un usuario nulo.
++     */
++    public function viewAny(?User $user): bool
++    {
++        return true;
++    }
++
++    public function view(?User $user, Product $product): bool
++    {
++        return true;
++    }
++
++    /**
++     * Cualquier usuario autenticado puede cargar productos.
++     * Si mañana querés un catálogo centralizado, cambiás esto por
++     * $user->isAdmin() y el resto del sistema sigue funcionando igual.
++     */
++    public function create(User $user): bool
++    {
++        return true;
++    }
++
++    public function update(User $user, Product $product): bool
++    {
++        return $this->ownsOrIsAdmin($user, $product);
++    }
++
++    public function delete(User $user, Product $product): bool
++    {
++        return $this->ownsOrIsAdmin($user, $product);
++    }
++
++    private function ownsOrIsAdmin(User $user, Product $product): bool
++    {
++        if ($user->isAdmin()) {
++            return true;
++        }
++
++        // Los productos sin dueño (seeders, catálogo heredado) solo los
++        // administra un admin: null nunca debe coincidir con un usuario.
++        return $product->user_id !== null
++            && $product->user_id === $user->id;
++    }
++}
+diff --git a/app/Providers/AppServiceProvider.php b/app/Providers/AppServiceProvider.php
+index 452e6b6..cc2e636 100644
+--- a/app/Providers/AppServiceProvider.php
++++ b/app/Providers/AppServiceProvider.php
+@@ -2,7 +2,14 @@
+ 
+ namespace App\Providers;
+ 
++use App\Models\Product;
++use App\Policies\ProductPolicy;
++use Illuminate\Cache\RateLimiting\Limit;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\Gate;
++use Illuminate\Support\Facades\RateLimiter;
+ use Illuminate\Support\ServiceProvider;
++use Illuminate\Support\Str;
+ 
+ class AppServiceProvider extends ServiceProvider
+ {
+@@ -19,6 +26,36 @@ public function register(): void
+      */
+     public function boot(): void
+     {
+-        //
++        $this->registerPolicies();
++        $this->configureRateLimiting();
++    }
++
++    /**
++     * Laravel descubre las policies por convención, pero registrarlas
++     * explícitamente evita que un renombre silencioso deje todo sin autorizar.
++     */
++    private function registerPolicies(): void
++    {
++        Gate::policy(Product::class, ProductPolicy::class);
++    }
++
++    private function configureRateLimiting(): void
++    {
++        // Límite general de la API: por usuario si hay token, por IP si no.
++        RateLimiter::for('api', function (Request $request) {
++            return Limit::perMinute(60)->by($request->user()?->id ?: $request->ip());
++        });
++
++        // Límite estricto para login y registro. Dos cotas en simultáneo:
++        // una por credencial (frena fuerza bruta contra una cuenta) y otra
++        // por IP (frena el barrido de muchas cuentas desde un mismo origen).
++        RateLimiter::for('auth', function (Request $request) {
++            $email = Str::lower((string) $request->input('email'));
++
++            return [
++                Limit::perMinute(5)->by($email.'|'.$request->ip()),
++                Limit::perMinute(20)->by($request->ip()),
++            ];
++        });
+     }
+ }
+diff --git a/bootstrap/app.php b/bootstrap/app.php
+index c3928c5..7a4b324 100644
+--- a/bootstrap/app.php
++++ b/bootstrap/app.php
+@@ -3,6 +3,7 @@
+ use Illuminate\Foundation\Application;
+ use Illuminate\Foundation\Configuration\Exceptions;
+ use Illuminate\Foundation\Configuration\Middleware;
++use Illuminate\Http\Request;
+ 
+ return Application::configure(basePath: dirname(__DIR__))
+     ->withRouting(
+@@ -12,8 +13,14 @@
+         health: '/up',
+     )
+     ->withMiddleware(function (Middleware $middleware): void {
+-        //
++        // Laravel 11/12 NO aplica rate limiting al grupo `api` por defecto.
++        // Esto activa el limiter 'api' definido en AppServiceProvider.
++        $middleware->throttleApi();
+     })
+     ->withExceptions(function (Exceptions $exceptions): void {
+-        //
++        // Sin esto, un cliente que no mande `Accept: application/json`
++        // recibe HTML en los 403 / 404 / 422 en lugar de JSON.
++        $exceptions->shouldRenderJsonWhen(function (Request $request, Throwable $e) {
++            return $request->is('api/*') || $request->expectsJson();
++        });
+     })->create();
+diff --git a/database/factories/ProductFactory.php b/database/factories/ProductFactory.php
+index fb68aaa..dd9974a 100644
+--- a/database/factories/ProductFactory.php
++++ b/database/factories/ProductFactory.php
+@@ -4,6 +4,7 @@
+ 
+ use Illuminate\Database\Eloquent\Factories\Factory;
+ use App\Models\Product;
++use App\Models\User;
+ /**
+  * @extends \Illuminate\Database\Eloquent\Factories\Factory<\App\Models\Product>
+  */
+@@ -30,8 +31,9 @@ public function definition(): array
+                 'Productos para baño',
+                 'Productos para cocina'
+             ]),
+-            'price' => $this->faker->randomFloat(200, 500, 5000),
++            'price' => $this->faker->randomFloat(2, 500, 5000),
+             'stock' => $this->faker->numberBetween(0, 100),
++            'user_id' => User::factory(),
+         ];
+     }
+ }
+diff --git a/database/factories/UserFactory.php b/database/factories/UserFactory.php
+index 584104c..4b89da2 100644
+--- a/database/factories/UserFactory.php
++++ b/database/factories/UserFactory.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Database\Factories;
+ 
++use App\Enums\UserRole;
+ use Illuminate\Database\Eloquent\Factories\Factory;
+ use Illuminate\Support\Facades\Hash;
+ use Illuminate\Support\Str;
+@@ -28,10 +29,21 @@ public function definition(): array
+             'email' => fake()->unique()->safeEmail(),
+             'email_verified_at' => now(),
+             'password' => static::$password ??= Hash::make('password'),
++            'role' => UserRole::User,
+             'remember_token' => Str::random(10),
+         ];
+     }
+ 
++    /**
++     * Indicate that the user is an administrator.
++     */
++    public function admin(): static
++    {
++        return $this->state(fn (array $attributes) => [
++            'role' => UserRole::Admin,
++        ]);
++    }
++
+     /**
+      * Indicate that the model's email address should be unverified.
+      */
+diff --git a/database/migrations/2026_09_23_120000_add_role_to_users_table.php b/database/migrations/2026_09_23_120000_add_role_to_users_table.php
+new file mode 100644
+index 0000000..bfe86c0
+--- /dev/null
++++ b/database/migrations/2026_09_23_120000_add_role_to_users_table.php
+@@ -0,0 +1,23 @@
++<?php
++
++use App\Enums\UserRole;
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->string('role')->default(UserRole::User->value)->after('email');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('users', function (Blueprint $table) {
++            $table->dropColumn('role');
++        });
++    }
++};
+diff --git a/database/migrations/2026_09_23_120100_add_user_id_to_products_table.php b/database/migrations/2026_09_23_120100_add_user_id_to_products_table.php
+new file mode 100644
+index 0000000..814f7b0
+--- /dev/null
++++ b/database/migrations/2026_09_23_120100_add_user_id_to_products_table.php
+@@ -0,0 +1,29 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('products', function (Blueprint $table) {
++            // Nullable: los productos cargados por seeders o migrados desde antes
++            // no tienen dueño, y en ese caso solo un admin puede administrarlos.
++            // nullOnDelete: borrar un usuario no debe borrar el catálogo.
++            $table->foreignId('user_id')
++                ->nullable()
++                ->after('id')
++                ->constrained()
++                ->nullOnDelete();
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('products', function (Blueprint $table) {
++            $table->dropConstrainedForeignId('user_id');
++        });
++    }
++};
+diff --git a/database/seeders/DatabaseSeeder.php b/database/seeders/DatabaseSeeder.php
+index e154901..37366f0 100644
+--- a/database/seeders/DatabaseSeeder.php
++++ b/database/seeders/DatabaseSeeder.php
+@@ -3,24 +3,22 @@
+ namespace Database\Seeders;
+ 
+ use App\Models\User;
+-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+ use Illuminate\Database\Seeder;
+ 
+ class DatabaseSeeder extends Seeder
+ {
+-    use WithoutModelEvents;
++    use \Illuminate\Database\Console\Seeds\WithoutModelEvents;
+ 
+     /**
+      * Seed the application's database.
+      */
+     public function run(): void
+     {
+-        // User::factory(10)->create();
+-
+-        User::factory()->create([
++        // El cast 'hashed' del modelo se encarga de hashear la contraseña.
++        User::factory()->admin()->create([
+             'name' => 'admin',
+             'email' => 'admin@example.com',
+-            'password' => bcrypt('admin1234')
++            'password' => 'admin1234',
+         ]);
+ 
+         // Llamada al seeder de productos
+diff --git a/database/seeders/ProductSeeder.php b/database/seeders/ProductSeeder.php
+index 8e38ba6..5dcfd2d 100644
+--- a/database/seeders/ProductSeeder.php
++++ b/database/seeders/ProductSeeder.php
+@@ -2,17 +2,20 @@
+ 
+ namespace Database\Seeders;
+ 
+-use Illuminate\Database\Console\Seeds\WithoutModelEvents;
+-use Illuminate\Database\Seeder;
+ use App\Models\Product;
++use App\Models\User;
++use Illuminate\Database\Seeder;
+ 
+ class ProductSeeder extends Seeder
+-{   
++{
+     /**
+      * Run the database seeds.
+      */
+     public function run(): void
+     {
+-        Product::factory(50)->create();
++        $owner = User::query()->where('email', 'admin@example.com')->first()
++            ?? User::factory()->admin()->create();
++
++        Product::factory(50)->for($owner)->create();
+     }
+ }
+diff --git a/routes/api.php b/routes/api.php
+index 32a534e..63d52bd 100644
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -4,15 +4,18 @@
+ use App\Http\Controllers\Api\ProductController;
+ use Illuminate\Support\Facades\Route;
+ 
+-// Login y Register
+-Route::post('register', [AuthController::class, 'register']);
+-Route::post('login', [AuthController::class, 'login']);
++// Login y Register: throttle estricto contra fuerza bruta (limiter 'auth').
++Route::middleware('throttle:auth')->group(function () {
++    Route::post('register', [AuthController::class, 'register']);
++    Route::post('login', [AuthController::class, 'login']);
++});
+ 
+ // Rutas públicas (sin autenticación) - Solo lectura
+ Route::get('products', [ProductController::class, 'index']);
+ Route::get('products/{product}', [ProductController::class, 'show']);
+ 
+ // Rutas protegidas (requieren autenticación) - Crear, actualizar, eliminar
++// La autorización fina (dueño o admin) la resuelve ProductPolicy.
+ Route::middleware('auth:sanctum')->group(function () {
+ 
+     Route::post('logout', [AuthController::class, 'logout']);
+diff --git a/tests/Feature/ProductApiTest.php b/tests/Feature/ProductApiTest.php
+index f29fd0b..6381829 100644
+--- a/tests/Feature/ProductApiTest.php
++++ b/tests/Feature/ProductApiTest.php
+@@ -20,10 +20,10 @@ public function test_it_shows_a_product_with_a_success_status(): void
+             ->assertJsonPath('id', $product->id);
+     }
+ 
+-    public function test_an_authenticated_user_can_update_a_product(): void
++    public function test_the_owner_can_update_their_product(): void
+     {
+         $user = User::factory()->create();
+-        $product = Product::factory()->create();
++        $product = Product::factory()->for($user)->create();
+ 
+         $this->actingAs($user, 'sanctum')
+             ->putJson('/api/products/'.$product->id, [
+diff --git a/tests/Feature/ProductAuthorizationTest.php b/tests/Feature/ProductAuthorizationTest.php
+new file mode 100644
+index 0000000..5afa4b2
+--- /dev/null
++++ b/tests/Feature/ProductAuthorizationTest.php
+@@ -0,0 +1,175 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\Product;
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Tests\TestCase;
++
++class ProductAuthorizationTest extends TestCase
++{
++    use RefreshDatabase;
++
++    /** @return array<string, mixed> */
++    private function validPayload(array $overrides = []): array
++    {
++        return array_merge([
++            'name' => 'Detergente Líquido',
++            'description' => 'Bidón de 5 litros',
++            'category' => 'Detergentes',
++            'price' => 1250.00,
++            'stock' => 20,
++        ], $overrides);
++    }
++
++    public function test_a_guest_cannot_create_a_product(): void
++    {
++        $this->postJson('/api/products', $this->validPayload())
++            ->assertUnauthorized();
++
++        $this->assertDatabaseCount('products', 0);
++    }
++
++    public function test_a_guest_cannot_delete_a_product(): void
++    {
++        $product = Product::factory()->create();
++
++        $this->deleteJson('/api/products/'.$product->id)
++            ->assertUnauthorized();
++
++        $this->assertDatabaseHas('products', ['id' => $product->id]);
++    }
++
++    public function test_a_created_product_belongs_to_the_authenticated_user(): void
++    {
++        $user = User::factory()->create();
++
++        $this->actingAs($user, 'sanctum')
++            ->postJson('/api/products', $this->validPayload())
++            ->assertCreated();
++
++        $this->assertDatabaseHas('products', [
++            'name' => 'Detergente Líquido',
++            'user_id' => $user->id,
++        ]);
++    }
++
++    public function test_the_owner_cannot_be_spoofed_through_the_request_body(): void
++    {
++        $user = User::factory()->create();
++        $victim = User::factory()->create();
++
++        $this->actingAs($user, 'sanctum')
++            ->postJson('/api/products', $this->validPayload(['user_id' => $victim->id]))
++            ->assertCreated();
++
++        $this->assertDatabaseHas('products', ['user_id' => $user->id]);
++        $this->assertDatabaseMissing('products', ['user_id' => $victim->id]);
++    }
++
++    public function test_a_user_cannot_update_someone_elses_product(): void
++    {
++        $intruder = User::factory()->create();
++        $product = Product::factory()->create(['name' => 'Nombre original']);
++
++        $this->actingAs($intruder, 'sanctum')
++            ->putJson('/api/products/'.$product->id, $this->validPayload(['name' => 'Hackeado']))
++            ->assertForbidden();
++
++        $this->assertDatabaseHas('products', [
++            'id' => $product->id,
++            'name' => 'Nombre original',
++        ]);
++    }
++
++    public function test_a_user_cannot_delete_someone_elses_product(): void
++    {
++        $intruder = User::factory()->create();
++        $product = Product::factory()->create();
++
++        $this->actingAs($intruder, 'sanctum')
++            ->deleteJson('/api/products/'.$product->id)
++            ->assertForbidden();
++
++        $this->assertDatabaseHas('products', ['id' => $product->id]);
++    }
++
++    public function test_the_owner_can_delete_their_product(): void
++    {
++        $user = User::factory()->create();
++        $product = Product::factory()->for($user)->create();
++
++        $this->actingAs($user, 'sanctum')
++            ->deleteJson('/api/products/'.$product->id)
++            ->assertOk();
++
++        $this->assertDatabaseMissing('products', ['id' => $product->id]);
++    }
++
++    public function test_an_admin_can_update_any_product(): void
++    {
++        $admin = User::factory()->admin()->create();
++        $product = Product::factory()->create();
++
++        $this->actingAs($admin, 'sanctum')
++            ->putJson('/api/products/'.$product->id, $this->validPayload(['name' => 'Corregido por admin']))
++            ->assertOk();
++
++        $this->assertDatabaseHas('products', [
++            'id' => $product->id,
++            'name' => 'Corregido por admin',
++        ]);
++    }
++
++    public function test_an_admin_can_delete_any_product(): void
++    {
++        $admin = User::factory()->admin()->create();
++        $product = Product::factory()->create();
++
++        $this->actingAs($admin, 'sanctum')
++            ->deleteJson('/api/products/'.$product->id)
++            ->assertOk();
++
++        $this->assertDatabaseMissing('products', ['id' => $product->id]);
++    }
++
++    public function test_products_without_an_owner_are_only_manageable_by_admins(): void
++    {
++        $user = User::factory()->create();
++        $orphan = Product::factory()->create(['user_id' => null]);
++
++        $this->actingAs($user, 'sanctum')
++            ->deleteJson('/api/products/'.$orphan->id)
++            ->assertForbidden();
++
++        $admin = User::factory()->admin()->create();
++
++        $this->actingAs($admin, 'sanctum')
++            ->deleteJson('/api/products/'.$orphan->id)
++            ->assertOk();
++    }
++
++    public function test_registration_cannot_grant_the_admin_role(): void
++    {
++        $this->postJson('/api/register', [
++            'name' => 'Intruso',
++            'email' => 'intruso@example.com',
++            'password' => 'secret123',
++            'password_confirmation' => 'secret123',
++            'role' => 'admin',
++        ])->assertCreated();
++
++        $this->assertDatabaseHas('users', [
++            'email' => 'intruso@example.com',
++            'role' => 'user',
++        ]);
++    }
++
++    public function test_reading_products_stays_public(): void
++    {
++        Product::factory()->count(3)->create();
++
++        $this->getJson('/api/products')->assertOk();
++    }
++}
+diff --git a/tests/Feature/RateLimitTest.php b/tests/Feature/RateLimitTest.php
+new file mode 100644
+index 0000000..2afcf94
+--- /dev/null
++++ b/tests/Feature/RateLimitTest.php
+@@ -0,0 +1,72 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\User;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Tests\TestCase;
++
++class RateLimitTest extends TestCase
++{
++    use RefreshDatabase;
++
++    public function test_login_is_throttled_after_repeated_failures(): void
++    {
++        User::factory()->create(['email' => 'victima@example.com']);
++
++        $credentials = [
++            'email' => 'victima@example.com',
++            'password' => 'contrasena-incorrecta',
++        ];
++
++        // El limiter 'auth' permite 5 intentos por minuto y credencial.
++        for ($attempt = 1; $attempt <= 5; $attempt++) {
++            $this->postJson('/api/login', $credentials)
++                ->assertUnprocessable();
++        }
++
++        $this->postJson('/api/login', $credentials)
++            ->assertStatus(429);
++    }
++
++    public function test_the_throttle_does_not_leak_between_different_accounts(): void
++    {
++        $credentials = ['password' => 'contrasena-incorrecta'];
++
++        for ($attempt = 1; $attempt <= 5; $attempt++) {
++            $this->postJson('/api/login', $credentials + ['email' => 'uno@example.com'])
++                ->assertUnprocessable();
++        }
++
++        // Otra cuenta sigue pudiendo intentar: el bloqueo es por credencial,
++        // no global. (La cota por IP es de 20/min, todavía no se alcanza.)
++        $this->postJson('/api/login', $credentials + ['email' => 'dos@example.com'])
++            ->assertUnprocessable();
++    }
++
++    public function test_register_is_throttled(): void
++    {
++        for ($attempt = 1; $attempt <= 5; $attempt++) {
++            $this->postJson('/api/register', [
++                'name' => 'Usuario '.$attempt,
++                'email' => 'nuevo@example.com',
++                'password' => 'secret123',
++                'password_confirmation' => 'secret123',
++            ]);
++        }
++
++        $this->postJson('/api/register', [
++            'name' => 'Usuario 6',
++            'email' => 'nuevo@example.com',
++            'password' => 'secret123',
++            'password_confirmation' => 'secret123',
++        ])->assertStatus(429);
++    }
++
++    public function test_api_routes_expose_rate_limit_headers(): void
++    {
++        $this->getJson('/api/products')
++            ->assertOk()
++            ->assertHeader('X-RateLimit-Limit', 60);
++    }
++}
